@@ -13,7 +13,7 @@ use rstd::prelude::*;
 use rstd::{collections::btree_map::BTreeMap};
 use app_crypto::RuntimeAppPublic;
 use support::{decl_module, decl_storage, decl_event, print, dispatch::Result};
-use system::ensure_signed;
+// use system::ensure_signed;
 use system::offchain::{SubmitSignedTransaction, SubmitUnsignedTransaction};
 use codec::{Encode, Decode};
 use simple_json::{ self, json::JsonValue };
@@ -50,13 +50,13 @@ pub const KEY_TYPE: app_crypto::KeyTypeId = app_crypto::KeyTypeId(*b"ofpf");
 
 // This automates price fetching every certain blocks. Set to 0 disable this feature.
 //   Then you need to manucally kickoff pricefetch
-pub const BLOCK_FETCH_DUR: u64 = 5;
+pub const BLOCK_FETCH_DUR: u64 = 3;
 
-pub const FETCHED_CRYPTOS: [(&'static [u8], &'static [u8], &'static [u8]); 1] = [
+pub const FETCHED_CRYPTOS: [(&'static [u8], &'static [u8], &'static [u8]); 2] = [
   (b"BTC", b"coincap",
     b"https://api.coincap.io/v2/assets/bitcoin"),
-  // (b"BTC", b"coinmarketcap",
-  //  b"https://sandbox-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?CMC_PRO_API_KEY=2e6d8847-bcea-4999-87b1-ad452efe4e40&symbol=BTC"),
+  (b"BTC", b"coinmarketcap",
+   b"https://sandbox-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?CMC_PRO_API_KEY=2e6d8847-bcea-4999-87b1-ad452efe4e40&symbol=BTC"),
   // (b"ETH", b"coincap",
   //  b"https://api.coincap.io/v2/assets/ethereum"),
   // (b"ETH", b"coinmarketcap",
@@ -155,9 +155,9 @@ decl_module! {
         symbol.clone(), remote_src.clone(), now.clone(), price.clone()));
 
       let price_pt = (now, price);
-      <SrcPricePoints<T>>::mutate(|vec| vec.push(price_pt));
       // The index serves as the ID
       let pp_id: u64 = Self::src_price_pts().len().try_into().unwrap();
+      <SrcPricePoints<T>>::mutate(|vec| vec.push(price_pt));
       <TokenSrcPPMap>::mutate(symbol, |token_vec| token_vec.push(pp_id));
       <RemoteSrcPPMap>::mutate(remote_src, |rs_vec| rs_vec.push(pp_id));
 
@@ -184,8 +184,8 @@ decl_module! {
 
       // Record in the storage
       let price_pt = (now.clone(), price.clone());
-      <AggPricePoints<T>>::mutate(|vec| vec.push(price_pt));
       let pp_id: u64 = Self::agg_price_pts().len().try_into().unwrap();
+      <AggPricePoints<T>>::mutate(|vec| vec.push(price_pt));
       <TokenAggPPMap>::mutate(sym, |vec| vec.push(pp_id));
 
       Ok(())
@@ -207,7 +207,7 @@ decl_module! {
       if Self::update_agg_pp() {
         if let Err(err_msg) = Self::aggregate_pp() { print(err_msg); }
       }
-    } // end of `fn offchain_worker`
+    }
 
   }
 }
@@ -266,10 +266,41 @@ impl<T: Trait> Module<T> {
       .map_err(|_| "fetch_price: submit_unsigned_call error")
   }
 
-  fn fetch_price_from_coincap(_json: JsonValue) -> StdResult<Price> {
-    // TODO: imeplement the logic
-    runtime_io::print_utf8(b"-- fetch_price_from_coincap");
-    Ok(Price::new(100, 3500, None))
+  fn fetch_price_from_coincap(json: JsonValue) -> StdResult<Price> {
+    let data = json.get_object()[0].1.get_object();
+
+    let price_bytes = "priceUsd".as_bytes().to_vec();
+    let (_, v) = data.iter()
+      .filter(|(k, _)| {
+        let k_bytes = k.iter().map(|c| *c as u8).collect::<Vec<_>>();
+        k_bytes == price_bytes
+      })
+      .nth(0).expect("Should have `priceUsd` field");
+
+    // `val` contains the price, such as "222.333" in bytes form
+    let val: Vec<u8> = v.get_bytes();
+    let dot_pos = val.iter().position(|&i| i == ('.' as u8)).unwrap();
+    let dollars_byte: Vec<u8> = val.get(0..dot_pos).unwrap().to_vec();
+    let cents_byte: Vec<u8> = val.get((dot_pos + 1)..).unwrap().to_vec();
+
+    // Convert to number
+    let dollars_u32: u32 = Self::vec_bytes_to_u32(dollars_byte, 0);
+    let cents_u32: u32 = Self::vec_bytes_to_u32(cents_byte, 4);
+    Ok(Price::new(dollars_u32, cents_u32, None))
+  }
+
+  fn vec_bytes_to_u32(it: impl IntoIterator<Item = u8>, take: usize) -> u32 {
+    it.into_iter().enumerate()
+      .filter_map(|(pos, byte)| {
+        // pos need to take an additional digit for rounding
+        if take == 0 || pos <= take { return Some((pos, (byte as char).to_digit(10).unwrap())); }
+        None
+      })
+      .fold(0, |acc, (pos, digit)| {
+        if take == 0 || pos < take { acc * 10 + digit }
+        // rounding
+        else { if digit >= 5 { acc + 1 } else { acc } }
+      })
   }
 
   fn fetch_price_from_coinmarketcap(_json: JsonValue) -> StdResult<Price> {
@@ -299,6 +330,9 @@ impl<T: Trait> support::unsigned::ValidateUnsigned for Module<T> {
 
   fn validate_unsigned(call: &Self::Call) -> TransactionValidity {
     let now = <timestamp::Module<T>>::get();
+
+    runtime_io::print_utf8(b"validate_unsigned");
+    runtime_io::print_num(TryInto::<u64>::try_into(now).ok().unwrap());
 
     match call {
       Call::record_price(..) => Ok(ValidTransaction {
