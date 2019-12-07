@@ -16,7 +16,7 @@ use support::{decl_module, decl_storage, decl_event, print, dispatch::Result};
 // use system::ensure_signed;
 use system::offchain::{SubmitSignedTransaction, SubmitUnsignedTransaction};
 use codec::{Encode, Decode};
-use simple_json::{ self, json::JsonValue };
+use simple_json::{ self, json, json::JsonValue, json::JsonObject };
 use core::convert::{ TryInto };
 use sr_primitives::{
   transaction_validity::{
@@ -26,13 +26,13 @@ use sr_primitives::{
 
 #[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
 pub struct Price {
-  dollars: u32,
-  cents: u32, // up to 4 digits
+  dollars: u64,
+  cents: u64, // up to 4 digits
   currency: Vec<u8>,
 }
 
 impl Price {
-  fn new(dollars: u32, cents: u32, currency: Option<Vec<u8>>) -> Price {
+  fn new(dollars: u64, cents: u64, currency: Option<Vec<u8>>) -> Price {
     match currency {
       Some(curr) => Price{dollars, cents, currency: curr},
       None => Price{dollars, cents, currency: b"usd".to_vec()}
@@ -50,7 +50,8 @@ pub const KEY_TYPE: app_crypto::KeyTypeId = app_crypto::KeyTypeId(*b"ofpf");
 
 // This automates price fetching every certain blocks. Set to 0 disable this feature.
 //   Then you need to manucally kickoff pricefetch
-pub const BLOCK_FETCH_DUR: u64 = 3;
+const BLOCK_FETCH_DUR: u64 = 3;
+const ZERO_ASCII: u64 = 48;
 
 pub const FETCHED_CRYPTOS: [(&'static [u8], &'static [u8], &'static [u8]); 2] = [
   (b"BTC", b"coincap",
@@ -266,13 +267,49 @@ impl<T: Trait> Module<T> {
       .map_err(|_| "fetch_price: submit_unsigned_call error")
   }
 
-  fn fetch_price_from_coincap(json: JsonValue) -> StdResult<Price> {
-    let data = json.get_object()[0].1.get_object();
+  fn vecchars_to_vecbytes<I: IntoIterator<Item = char> + Clone>(it: &I) -> Vec<u8> {
+    it.clone().into_iter().map(|c| c as u8).collect::<_>()
+  }
 
-    let price_bytes = "priceUsd".as_bytes().to_vec();
+  fn str_to_vecbytes<'a>(str_val: &'a str) -> Vec<u8> {
+    str_val.as_bytes().to_vec()
+  }
+
+  fn vecbytes_to_u64(it: impl IntoIterator<Item = u8>, take: usize) -> u64 {
+    it.into_iter().enumerate()
+      .filter_map(|(pos, byte)| {
+        // pos need to take an additional digit for rounding
+        if take == 0 || pos <= take { return Some((pos, (byte as char).to_digit(10).unwrap())); }
+        None
+      })
+      .fold(0, |acc, (pos, digit)| {
+        if take == 0 || pos < take { acc * 10 + (digit as u64) }
+        // rounding
+        else { if digit >= 5 { acc + 1 } else { acc } }
+      })
+  }
+
+  fn u64_to_vecbytes(num: u64) -> Vec<u8> {
+    let mut vecbytes: Vec<u8> = vec![];
+    let mut num = num;
+    while num > 0 {
+      let digit = num % 10;
+      num /= 10;
+      vecbytes.push((digit + ZERO_ASCII) as u8);
+    }
+    vecbytes.into_iter().rev().collect::<Vec<_>>()
+  }
+
+  fn fetch_price_from_coincap(json_val: JsonValue) -> StdResult<Price> {
+    // This is the expected JSON path:
+    // r#"{"data":{"priceUsd":"8172.2628346190447316"}}"#;
+
+    let data = json_val.get_object()[0].1.get_object();
+    let price_bytes = Self::str_to_vecbytes("priceUsd");
+
     let (_, v) = data.iter()
       .filter(|(k, _)| {
-        let k_bytes = k.iter().map(|c| *c as u8).collect::<Vec<_>>();
+        let k_bytes = Self::vecchars_to_vecbytes(k);
         k_bytes == price_bytes
       })
       .nth(0).expect("Should have `priceUsd` field");
@@ -284,29 +321,39 @@ impl<T: Trait> Module<T> {
     let cents_byte: Vec<u8> = val.get((dot_pos + 1)..).unwrap().to_vec();
 
     // Convert to number
-    let dollars_u32: u32 = Self::vec_bytes_to_u32(dollars_byte, 0);
-    let cents_u32: u32 = Self::vec_bytes_to_u32(cents_byte, 4);
-    Ok(Price::new(dollars_u32, cents_u32, None))
+    let dollars_u64: u64 = Self::vecbytes_to_u64(dollars_byte, 0);
+    let cents_u64: u64 = Self::vecbytes_to_u64(cents_byte, 4);
+    Ok(Price::new(dollars_u64, cents_u64, None))
   }
 
-  fn vec_bytes_to_u32(it: impl IntoIterator<Item = u8>, take: usize) -> u32 {
-    it.into_iter().enumerate()
-      .filter_map(|(pos, byte)| {
-        // pos need to take an additional digit for rounding
-        if take == 0 || pos <= take { return Some((pos, (byte as char).to_digit(10).unwrap())); }
-        None
-      })
-      .fold(0, |acc, (pos, digit)| {
-        if take == 0 || pos < take { acc * 10 + digit }
-        // rounding
-        else { if digit >= 5 { acc + 1 } else { acc } }
-      })
-  }
+  fn fetch_price_from_coinmarketcap(json_val: JsonValue) -> StdResult<Price> {
+    // This is the expected JSON path:
+    // r#"{"data":{"BTC":{"quote": {"USD": {"price": 9558.55165723}}}}}"#;
+    let btc_data: &JsonObject = json_val.get_object()[1]
+      .1.get_object()[0]
+      .1.get_object();
 
-  fn fetch_price_from_coinmarketcap(_json: JsonValue) -> StdResult<Price> {
-    // TODO: imeplement the logic
-    runtime_io::print_utf8(b"-- fetch_price_from_coinmarketcap");
-    Ok(Price::new(200, 5000, None))
+    let quote_usd_data: &JsonObject = btc_data.iter()
+      .filter_map(|(k, v)|
+        if Self::vecchars_to_vecbytes(k) == Self::str_to_vecbytes("quote") { Some(v) } else { None }
+      )
+      .nth(0).unwrap()
+      .get_object()[0]
+      .1.get_object();
+
+    let price: &JsonValue = quote_usd_data.iter()
+      .filter_map(|(k, v)|
+        if Self::vecchars_to_vecbytes(k) == Self::str_to_vecbytes("price") { Some(v) } else { None }
+      )
+      .nth(0).unwrap();
+
+    if let JsonValue::Number(json::NumberValue{integer: dollars, fraction: cents, ..}) = price {
+      let dollars = *dollars as u64;
+      let cents = Self::vecbytes_to_u64(Self::u64_to_vecbytes(*cents), 4);
+      Ok(Price::new(dollars, cents, None))
+    } else {
+      Err("fetch_price_from_coinmarketcap: Price not found in JSON path")
+    }
   }
 
   fn aggregate_pp() -> Result {
