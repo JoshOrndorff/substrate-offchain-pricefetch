@@ -145,11 +145,12 @@ decl_module! {
       let now = <timestamp::Module<T>>::get();
 
       // Debug printout
-      runtime_io::print_utf8(b"record_price: called");
+      runtime_io::print_utf8(b"--- record_price");
       runtime_io::print_utf8(&symbol);
       runtime_io::print_utf8(&remote_src);
       runtime_io::print_num(price.dollars.into());
       runtime_io::print_num(price.cents.into());
+      runtime_io::print_utf8(b"--- record_price: end");
 
       // Spit out an event and Add to storage
       Self::deposit_event(RawEvent::PriceFetched(
@@ -163,20 +164,24 @@ decl_module! {
       <RemoteSrcPPMap>::mutate(remote_src, |rs_vec| rs_vec.push(pp_id));
 
       // set the flag to kick off update aggregated pricing
+      print("UpdateAggPP: set to true");
       <UpdateAggPP>::mutate(|flag| *flag = true);
 
       Ok(())
     }
 
     pub fn record_agg_pp(_origin, sym: Vec<u8>, price: Price) -> Result {
+
       // Debug printout
-      runtime_io::print_utf8(b"record_agg_pp: called");
+      print("--- record_agg_pp");
       runtime_io::print_utf8(&sym);
       runtime_io::print_num(price.dollars.into());
       runtime_io::print_num(price.cents.into());
+      print("--- record_agg_pp: end");
 
       let now = <timestamp::Module<T>>::get();
       // Turn off the flag for request has been handled
+      print("UpdateAggPP: set to false");
       <UpdateAggPP>::mutate(|flag| *flag = false);
 
       // Spit the event
@@ -205,8 +210,14 @@ decl_module! {
       }
 
       // Type II task: aggregate price
+      print("offchain_worker");
+      runtime_io::print_num(Self::update_agg_pp().into());
+
       if Self::update_agg_pp() {
-        if let Err(err_msg) = Self::aggregate_pp() { print(err_msg); }
+        print("offchain_worker: calling aggregate_pp()");
+        if let Err(err_msg) = Self::aggregate_pp() {
+          print(err_msg);
+        }
       }
     }
 
@@ -238,7 +249,7 @@ impl<T: Trait> Module<T> {
     }
 
     // Print out the whole JSON blob
-    runtime_io::print_utf8(&json_result);
+    // runtime_io::print_utf8(&json_result);
 
     let json_val: JsonValue = simple_json::parse_json(
       &rstd::str::from_utf8(&json_result).unwrap())
@@ -248,12 +259,7 @@ impl<T: Trait> Module<T> {
   }
 
   fn fetch_price(sym: Vec<u8>, remote_src: Vec<u8>, remote_url: Vec<u8>) -> Result {
-    runtime_io::print_utf8(&sym);
-    runtime_io::print_utf8(&remote_src);
-    runtime_io::print_utf8(b"---");
-
     let json = Self::fetch_json(rstd::str::from_utf8(&remote_url).unwrap())?;
-
     let price = match remote_src.as_slice() {
       src if src == b"coincap" => Self::fetch_price_from_coincap(json)
         .map_err(|_| "fetch_price_from_coincap error")?,
@@ -262,9 +268,19 @@ impl<T: Trait> Module<T> {
       _ => return Err("Unknown remote source"),
     };
 
+    print("--- fetch_price");
+    runtime_io::print_utf8(&sym);
+    runtime_io::print_utf8(&remote_src);
+    runtime_io::print_num(price.dollars.into());
+    runtime_io::print_num(price.cents.into());
+    print("--- fetch_price: end");
+
     let call = Call::record_price((sym, remote_src, remote_url), price);
     T::SubmitUnsignedTransaction::submit_unsigned(call)
-      .map_err(|_| "fetch_price: submit_unsigned_call error")
+      .map_err(|_| {
+        print("fetch_price: submit_unsigned_call error");
+        "fetch_price: submit_unsigned_call error"
+      })
   }
 
   fn vecchars_to_vecbytes<I: IntoIterator<Item = char> + Clone>(it: &I) -> Vec<u8> {
@@ -357,8 +373,9 @@ impl<T: Trait> Module<T> {
   }
 
   fn aggregate_pp() -> Result {
-    let mut pp_map = BTreeMap::new();
+    // print("aggregate_pp entered");
 
+    let mut pp_map = BTreeMap::new();
     // TODO: calculate the map of sym -> pp
     pp_map.insert(b"BTC".to_vec(), Price::new(100, 3500, None));
 
@@ -382,17 +399,17 @@ impl<T: Trait> support::unsigned::ValidateUnsigned for Module<T> {
     runtime_io::print_num(TryInto::<u64>::try_into(now).ok().unwrap());
 
     match call {
-      Call::record_price(..) => Ok(ValidTransaction {
+      Call::record_price((sym, remote_src, ..), ..) => Ok(ValidTransaction {
         priority: 0,
         requires: vec![],
-        provides: vec![(now).encode()],
+        provides: vec![(now, sym, remote_src).encode()],
         longevity: TransactionLongevity::max_value(),
         propagate: true,
       }),
-      Call::record_agg_pp(..) => Ok(ValidTransaction {
+      Call::record_agg_pp(sym, ..) => Ok(ValidTransaction {
         priority: 0,
         requires: vec![],
-        provides: vec![(now).encode()],
+        provides: vec![(now, sym).encode()],
         longevity: TransactionLongevity::max_value(),
         propagate: true,
       }),
