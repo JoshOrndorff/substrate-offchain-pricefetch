@@ -6,10 +6,11 @@ project_root = File.expand_path("#{__dir__}/..");
 
 if (EXE_FLAG == "build")
   system("cd #{project_root}; cargo remote -- build --release")
-elsif (EXE_FLAG == "clean")
-  # this cmd meant to be run in remote dev host
-  system("#{project_root}/target/release/#{BINARY} purge-chain --dev && #{project_root}/target/release/#{BINARY} --dev");
 else
+  if (EXE_FLAG == "clean")
+    # this cmd meant to be run in remote dev host
+    system("#{project_root}/target/release/#{BINARY} purge-chain --dev");
+  end
   # this cmd meant to be run in remote dev host
-  system("#{project_root}/target/release/#{BINARY} --dev");
+  system("#{project_root}/target/release/#{BINARY} --dev -lruntime=trace");
 end

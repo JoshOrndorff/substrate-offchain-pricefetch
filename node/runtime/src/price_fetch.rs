@@ -58,10 +58,14 @@ pub const FETCHED_CRYPTOS: [(&'static [u8], &'static [u8], &'static [u8]); 2] = 
     b"https://api.coincap.io/v2/assets/bitcoin"),
   (b"BTC", b"coinmarketcap",
    b"https://sandbox-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?CMC_PRO_API_KEY=2e6d8847-bcea-4999-87b1-ad452efe4e40&symbol=BTC"),
+  // (b"BTC", b"cryptocompare",
+  //   b"https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD"),
   // (b"ETH", b"coincap",
   //  b"https://api.coincap.io/v2/assets/ethereum"),
   // (b"ETH", b"coinmarketcap",
   //  b"https://sandbox-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?CMC_PRO_API_KEY=2e6d8847-bcea-4999-87b1-ad452efe4e40&symbol=ETH"),
+  // (b"ETH", b"cryptocompare",
+  //   b"https://min-api.cryptocompare.com/data/price?fsym=ETH&tsyms=USD"),
 ];
 
 pub type StdResult<T> = core::result::Result<T, &'static str>;
